@@ -4,9 +4,9 @@ yet another OSS system
 
 ## road map
 
-[ ] write and search index
+- [ ] write and search index
 
-[ ] chunk file order
+- [ ] chunk file order
 
-[ ] Merkel tree based file check
+- [ ] Merkel tree based file check
 
