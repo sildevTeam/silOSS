@@ -42,3 +42,12 @@ func TestIndex_Insert(t *testing.T) {
 
 func TestNewIndex(t *testing.T) {
 }
+
+func TestReadIndex(t *testing.T) {
+	idx := NewIndex("/tmp/index")
+	err := idx.Open()
+	defer idx.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}

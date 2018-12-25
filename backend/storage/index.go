@@ -12,14 +12,14 @@ import (
 )
 
 const (
-	IndexVersion    = 1
-	IndexMagic      = "SILOSS"
-	IndexHeaderSize = 0 +
+	indexVersion    = 1
+	indexMagic      = "SILOSS"
+	indexHeaderSize = 0 +
 		6 + 1 + // magic &version
 		8 + // max offset
 		8 + // total size
 		0
-	IndexSlotSize = 0 +
+	indexSlotSize = 0 +
 		4 + // fId
 		4 + // chunkFile
 		8 + // offset
@@ -27,19 +27,17 @@ const (
 )
 
 type Index struct {
-	path      string // path of index file
-	maxOffset int64  // max offset in file
+	// path of index file
+	path string
+	// max offset in file
+	maxOffset int64
 	data      []byte
 	slotBytes []byte
 	slots     []IndexSlot
-	//size      int64
-	w *os.File
-	l int64
-	v uint8
+	w         *os.File
+	l         int64
+	v         uint8
 	sync.RWMutex
-}
-
-type Slot interface {
 }
 
 // 128bit or 16 byte
@@ -55,11 +53,25 @@ type IndexHeader struct {
 	Len       int64
 }
 
+func (ids *IndexSlot) GetFileId() uint32 {
+	return ids.fId
+}
+func (ids *IndexSlot) GetChunkFile() string {
+	return getChunkPath(ids.chunkFile)
+}
+func (ids *IndexSlot) GetOffset() int64 {
+	return ids.offset
+}
+
 // NewIndex returns a new instance of Index representing the index file of given path
 func NewIndex(path string) *Index {
 	idx := new(Index)
 	idx.path = path
 	return idx
+}
+
+func (idx *Index) GetSlots() []IndexSlot {
+	return idx.slots
 }
 
 func (idx *Index) Close() (err error) {
@@ -70,10 +82,29 @@ func (idx *Index) Close() (err error) {
 }
 
 func (idx *Index) Open() error {
-	var err error
-
-	f, err := os.OpenFile(idx.path, os.O_RDWR, 0644)
-	if err != nil {
+	//var err error
+	if _, err := os.Stat(idx.path); err != nil && os.IsNotExist(err) {
+		if err := makeDir(idx.path); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(idx.path, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			return err
+		} else {
+			h := NewIndexHeader()
+			if _, err := h.WriteTo(f); err != nil {
+				return err
+			}
+		}
+		idx.w = f
+	} else if _, err := os.Stat(idx.path); err == nil {
+		f, err := os.OpenFile(idx.path, os.O_RDWR, 0644)
+		if err != nil {
+			return err
+		}
+		idx.w = f
+	} else if _, err := os.Stat(idx.path); err != nil && !os.IsNotExist(err) {
+		// unknown error occurred
 		return err
 	}
 
@@ -96,11 +127,10 @@ func (idx *Index) Open() error {
 			idx.maxOffset = idh.MaxOffset
 			idx.l = idh.Len
 			idx.v = idh.Version
-			idx.w = f
 
 			// read data
 			switch idx.v {
-			case IndexVersion:
+			case indexVersion:
 				s, err := readIndexSlotsV1(idx)
 				if err != nil {
 					return err
@@ -109,7 +139,6 @@ func (idx *Index) Open() error {
 				break
 			default:
 				return errors.New("index file version not match")
-				break
 			}
 		}
 
@@ -119,18 +148,17 @@ func (idx *Index) Open() error {
 		idx.Close()
 		return err
 	}
-
 	return nil
 }
 
 func ReadIndexHeader(data []byte) (h IndexHeader, err error) {
 	r := bytes.NewReader(data)
-	magic := make([]byte, len(IndexMagic))
+	magic := make([]byte, len(indexMagic))
 
 	// magic
 	if _, err := io.ReadFull(r, magic); err != nil {
 		return h, err
-	} else if !bytes.Equal([]byte(IndexMagic), magic) {
+	} else if !bytes.Equal([]byte(indexMagic), magic) {
 		return h, errors.New("invalid index file")
 	}
 
@@ -155,10 +183,16 @@ func ReadIndexHeader(data []byte) (h IndexHeader, err error) {
 // write header
 func (h *IndexHeader) WriteTo(w io.Writer) (n int64, err error) {
 	var buf bytes.Buffer
-	buf.WriteString(IndexMagic)
-	binary.Write(&buf, binary.BigEndian, h.Version)
-	binary.Write(&buf, binary.BigEndian, h.MaxOffset)
-	binary.Write(&buf, binary.BigEndian, h.Len)
+	buf.WriteString(indexMagic)
+	if err := binary.Write(&buf, binary.BigEndian, h.Version); err != nil {
+		return 0, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, h.MaxOffset); err != nil {
+		return 0, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, h.Len); err != nil {
+		return 0, err
+	}
 	return buf.WriteTo(w)
 }
 
@@ -180,12 +214,12 @@ func (idx *Index) Insert(slot IndexSlot) (err error) {
 
 func (idx *Index) insert(slot IndexSlot) (err error) {
 	idx.slots = append(idx.slots, slot)
-	idx.updateIndexData(slot)
-	return nil
+	return idx.updateIndexData(slot)
 }
 
 // rebuild compact the index file
 func (idx *Index) Rebuild() (err error) {
+	// todo:compact index file
 	panic("not implemented")
 }
 
@@ -195,18 +229,24 @@ func readIndexSlotsV1(idx *Index) (slots []IndexSlot, err error) {
 	data := idx.data
 	r := bytes.NewReader(data)
 	// skip header
-	sz := len(data) - IndexHeaderSize
-	sr := io.NewSectionReader(r, IndexHeaderSize, int64(sz))
-	if sr.Size()%IndexSlotSize != 0 {
+	sz := len(data) - indexHeaderSize
+	sr := io.NewSectionReader(r, indexHeaderSize, int64(sz))
+	if sr.Size()%indexSlotSize != 0 {
 		return slots, errors.New("invalid index size")
 	}
-	slots = make([]IndexSlot, sr.Size()/IndexSlotSize)
+	slots = make([]IndexSlot, sr.Size()/indexSlotSize)
 	sl := len(slots)
 	for i := 0; i < sl; i++ {
 		s := new(IndexSlot)
-		binary.Read(sr, binary.BigEndian, &s.fId)
-		binary.Read(sr, binary.BigEndian, &s.chunkFile)
-		binary.Read(sr, binary.BigEndian, &s.offset)
+		if err := binary.Read(sr, binary.BigEndian, &s.fId); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(sr, binary.BigEndian, &s.chunkFile); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(sr, binary.BigEndian, &s.offset); err != nil {
+			return nil, err
+		}
 		slots[i] = *s
 	}
 
@@ -218,9 +258,15 @@ func (idx *Index) updateIndexData(s IndexSlot) (err error) {
 	var buf bytes.Buffer
 	var wBuf bytes.Buffer
 	// write slot to []byte
-	binary.Write(&buf, binary.BigEndian, s.fId)
-	binary.Write(&buf, binary.BigEndian, s.chunkFile)
-	binary.Write(&buf, binary.BigEndian, s.offset)
+	if err := binary.Write(&buf, binary.BigEndian, s.fId); err != nil {
+		return err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, s.chunkFile); err != nil {
+		return err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, s.offset); err != nil {
+		return err
+	}
 	// append slot bytes to file bytes
 	b := buf.Bytes()
 	idx.data = append(idx.data, b...)
@@ -230,30 +276,56 @@ func (idx *Index) updateIndexData(s IndexSlot) (err error) {
 		return nil
 	}
 	h.Len++
-	h.MaxOffset += IndexSlotSize
+	h.MaxOffset += indexSlotSize
 
-	binary.Write(&wBuf, binary.BigEndian, h.MaxOffset)
-	binary.Write(&wBuf, binary.BigEndian, h.Len)
+	if err := binary.Write(&wBuf, binary.BigEndian, h.MaxOffset); err != nil {
+		return err
+	}
+	if err := binary.Write(&wBuf, binary.BigEndian, h.Len); err != nil {
+		return err
+	}
 	wbs := wBuf.Bytes()
 
 	// update in memory data
-	for i := 6; i < IndexHeaderSize-1; i++ {
+	for i := 6; i < indexHeaderSize-1; i++ {
 		fmt.Printf("idx.data[%d],wbs[%d]\n", i, i-6)
 		idx.data[i] = wbs[i-6]
 	}
 
-	idx.w.Seek(7, 0)
-	idx.w.Write(wbs)
-
-	idx.w.Seek(0, 2)
-	idx.w.Write(b)
+	if _, err := idx.w.Seek(7, 0); err != nil {
+		return err
+	}
+	if _, err := idx.w.Write(wbs); err != nil {
+		return err
+	}
+	if _, err := idx.w.Seek(0, 2); err != nil {
+		return err
+	}
+	if _, err := idx.w.Write(b); err != nil {
+		return err
+	}
 
 	return nil
 }
 
+func (idx *Index) find(crc32 uint32) (find bool, slot *IndexSlot) {
+	for _, v := range idx.slots {
+		if v.fId == crc32 {
+			return true, &v
+		}
+	}
+	return false, nil
+}
+
+func (idx *Index) FindByMerkle(crc32 uint32) (find bool) {
+	//todo:write this
+	b, _ := idx.find(crc32)
+	return b
+}
+
 func NewIndexHeader() (h *IndexHeader) {
 	h = new(IndexHeader)
-	h.Version = IndexVersion
+	h.Version = indexVersion
 	h.MaxOffset = 0
 	h.Len = 0
 	return

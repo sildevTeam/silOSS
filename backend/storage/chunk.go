@@ -13,13 +13,15 @@ import (
 )
 
 const (
-	CHUNK_FILE_VERSION = 0x1
-	CHUNK_MAGIC        = "SILOSSC"
-	CHUNK_HEADER_COUNT = 0 +
+	defaultSegmentSize = 2 * 1024 * 1024 * 1024 //2G
+	chunkFileVersion   = 0x1
+	chunkMagic         = "SILOSSC"
+	chunkHeaderCount   = 0 +
 		7 + 1 +
 		8 + 8 +
 		8 + 8 +
 		0
+	chunkFileSuffix = ".chunk"
 )
 
 type Chunk struct {
@@ -50,11 +52,6 @@ func (c *Chunk) Close() error {
 func (c *Chunk) Open() error {
 	c.Lock()
 	defer c.Unlock()
-	//var err error
-	// open a file,DO NOT CREATE NEW FILE HERE!
-	//if !os.IsNotExist(err) {
-	//	return err
-	//}
 
 	if _, err := os.Stat(c.path); err != nil && !os.IsNotExist(err) {
 		return err
@@ -73,7 +70,8 @@ func (c *Chunk) Open() error {
 		c.sum = 0
 		c.size = 0
 		c.cTime = time.Now().Unix()
-		c.maxOffset = CHUNK_HEADER_COUNT // offset relative to the start position of the chunk file
+		// offset relative to the start position of the chunk file
+		c.maxOffset = chunkHeaderCount
 
 		//write default header
 		if err = c.WriteHeader(); err != nil {
@@ -105,12 +103,22 @@ func (c *Chunk) Open() error {
 
 func (c *Chunk) WriteHeader() error {
 	var buf bytes.Buffer
-	buf.WriteString(CHUNK_MAGIC)
-	binary.Write(&buf, binary.BigEndian, CHUNK_FILE_VERSION)
-	binary.Write(&buf, binary.BigEndian, c.sum)
-	binary.Write(&buf, binary.BigEndian, c.size)
-	binary.Write(&buf, binary.BigEndian, c.cTime)
-	binary.Write(&buf, binary.BigEndian, c.maxOffset)
+	buf.WriteString(chunkMagic)
+	if err := binary.Write(&buf, binary.BigEndian, chunkFileVersion); err != nil {
+		return err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, c.sum); err != nil {
+		return err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, c.size); err != nil {
+		return err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, c.cTime); err != nil {
+		return err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, c.maxOffset); err != nil {
+		return err
+	}
 	h := buf.Bytes()
 	_, err := c.w.Seek(0, 0)
 	if err != nil {
@@ -125,11 +133,11 @@ func (c *Chunk) WriteHeader() error {
 
 func (c *Chunk) ReadHeader() error {
 
-	magic := make([]byte, len(CHUNK_MAGIC))
+	magic := make([]byte, len(chunkMagic))
 	// check magic
 	if _, err := io.ReadFull(c.w, magic); err != nil {
 		return err
-	} else if !bytes.Equal(magic, []byte(CHUNK_MAGIC)) {
+	} else if !bytes.Equal(magic, []byte(chunkMagic)) {
 		return errors.New("invalid chunk file")
 	}
 	// sum
@@ -167,7 +175,7 @@ func (c *Chunk) AppendBlock(b *Block) (err error, slot *IndexSlot) {
 	c.size += b.OnDiskSize()
 
 	slot = new(IndexSlot)
-	if c, err := c.getChunkUint(); err == nil {
+	if c, err := c.GetChunkUint(); err == nil {
 		slot.chunkFile = c
 	} else {
 		return err, nil
@@ -183,8 +191,21 @@ func (c *Chunk) AppendBlock(b *Block) (err error, slot *IndexSlot) {
 	return nil, slot
 }
 
-func (c *Chunk) ReadBlock(offset int64) *Block {
-	return nil
+func (c *Chunk) ReadBlock(offset int64) (error, *Block) {
+	// seek to the start pos of the file
+	if _, err := c.w.Seek(offset, 0); err != nil {
+		return err, nil
+	}
+	return ReadBlock(c.w)
+}
+
+// transfer block transfer the reader to a sendfile syscall
+func (c *Chunk) TransferBlock(offset int64) (error, *Block, *io.Reader) {
+	// seek to the start pos of the file
+	if _, err := c.w.Seek(offset, 0); err != nil {
+		return err, nil, nil
+	}
+	return transferBlock(c.w)
 }
 
 func makeDir(path string) error {
@@ -203,7 +224,7 @@ func (c *Chunk) getFName() string {
 	return c.path[i+1:]
 }
 
-func (c *Chunk) getChunkUint() (uint32, error) {
+func (c *Chunk) GetChunkUint() (uint32, error) {
 	i := strings.LastIndex(c.getFName(), ".")
 	name := c.getFName()[:i]
 	if ni, err := strconv.Atoi(name); err == nil {

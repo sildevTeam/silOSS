@@ -4,9 +4,11 @@ yet another OSS system
 
 ## road map
 
-- [ ] write and search index
+- [x] write and search index
 
-- [ ] chunk file order
+- [x] chunk file order
 
 - [ ] Merkel tree based file check
+
+- [ ] http interface implemented the sendfile syscall
 
